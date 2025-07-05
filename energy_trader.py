@@ -12,8 +12,7 @@ from datetime import datetime, timedelta
 
 # Initialize global variables
 # Constants for the number of users
-NUM_SELLERS = 5
-NUM_BUYERS = 5
+NUM_SELLERS = 4
 NUM_MATCHER = 1
 TOTAL_SUPPLY = 1000000
 
@@ -298,42 +297,51 @@ def main():
    app_id = get_smart_contract(matcher)
 
    # Initialize the matcher, train and simulate
-   model = rl_model(NUM_SELLERS, NUM_BUYERS, 0.7, 0.3)
-   model.train(10000)
-   info = model.predict(True)
+   model = rl_model()
+   model.train()
+   txn_amts, settlement_prices = model.predict(True)
 
    txn_date = datetime.now()
    txn_date = txn_date.replace(hour=0, minute=0, second=0, microsecond=0)
 
    # Create the asset transactions for each hour
    txns = []
+   sender_address = None
+   receiver_address = None
+   txn_amt = None
    for h in range(24):
        print(f"Hour {h}:")
        txn_date_str = txn_date.strftime("%Y-%m-%d %H:%M:%S")
        note_str = f"Energy transaction for hour {h} on {txn_date_str}".encode("utf-8")
    
        for i in range(NUM_SELLERS):
-           # Make sure the offer is cleared.
-           if info[h, i] <= 0:
-               continue
+           # Set the sender and receiver addresses.
+           if txn_amts[h][i] <= 0:
+               # Battery charging is treated as supply from matcher.
+               sender_address = sellers[i]['address']
+               receiver_address = matcher['address']
+               txn_amt = int(abs(txn_amts[h][i]))
+           else:
+               sender_address = matcher['address']
+               receiver_address = sellers[i]['address']
+               txn_amt = int(txn_amts[h][i])
 
            # Create a new asset transfer transaction
            params = algod_client.suggested_params()
            txn = transaction.AssetTransferTxn(
-                sender=matcher['address'],
-                receiver=sellers[i]['address'],
-                amt=int(info[h, i]),
+                sender=sender_address,
+                receiver=receiver_address,
+                amt=txn_amt,
                 index=asset_id,
                 note=note_str,
                 sp=params
            )
-        
            txns.append(txn)
-        txn_date = txn_date + timedelta(hours=1)
+       txn_date = txn_date + timedelta(hours=1)
 
    # Create the application call transaction
    params = algod_client.suggested_params()
-   app_args = [str(info['Settlement Price']).encode()]
+   app_args = [str(settlement_prices[h]).encode()]
    app_txn = transaction.ApplicationCallTxn(
         sender=matcher['address'],
         sp=params,
