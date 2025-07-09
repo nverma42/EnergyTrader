@@ -1,4 +1,4 @@
-from gc import freeze
+from algosdk.encoding import decode_address
 from algosdk.v2client import algod
 from algosdk import mnemonic, account
 from algosdk import transaction
@@ -13,8 +13,12 @@ from datetime import datetime, timedelta
 # Initialize global variables
 # Constants for the number of users
 NUM_SELLERS = 4
+NUM_BUYERS = 1
 NUM_MATCHER = 1
-TOTAL_SUPPLY = 1000000
+TOTAL_SUPPLY = 2**64 -1  # Maximum supply for the asset
+SCALING_FACTOR = 0.001  # scale the original value
+SUCCESS = 1
+FAILURE = 0
 
 # Replace these values with your node's address
 # free service does not require tokens
@@ -83,6 +87,7 @@ def get_account_info():
     seller_list = []
     buyer_list = []
     matcher = {}
+    address_to_mnemonic = {}
     if (not os.path.exists("data/users.csv")):
         # Create a new accounts
         create_users()
@@ -93,6 +98,10 @@ def get_account_info():
         for line in lines:
             account_info = line.strip().split(", ")
             if len(account_info) == 3:
+                
+                # Store the address to mnemonic mapping
+                address_to_mnemonic[account_info[2]] = account_info[1]
+
                 if (account_info[0].startswith("seller_")):
                     seller_list.append({'Mnemonic': account_info[1], 'address': account_info[2]})
                 elif (account_info[0].startswith("buyer_")):
@@ -101,7 +110,7 @@ def get_account_info():
                     matcher = {'Mnemonic': account_info[1], 'address': account_info[2]}
             else:
                 print("Invalid account information format.")
-    return seller_list, buyer_list, matcher
+    return seller_list, buyer_list, matcher, address_to_mnemonic
 
 # Create energy asset
 def get_energy_asset(admin):
@@ -181,7 +190,7 @@ def get_smart_contract(admin):
             on_complete=transaction.OnComplete.NoOpOC,
             approval_program=approval_program,
             clear_program=clear_state_program,
-            global_schema=transaction.StateSchema(num_uints=1, num_byte_slices=0),
+            global_schema=transaction.StateSchema(num_uints=48, num_byte_slices=1),
             local_schema=transaction.StateSchema(num_uints=0, num_byte_slices=0)
         )
     
@@ -280,6 +289,49 @@ def opt_in(asset_id, sellers, buyers):
         except Exception as e:
             print(f"Failed to opt-in buyer {buyer['address']}: {e}")
 
+# Get the microalgos for the transaction amount and settlement price
+def get_microalgos(txn_amt, settlement_price):
+    # Calculate the microalgos based on the transaction amount and settlement price
+    # Assuming settlement_price is in dollars per unit of energy asset
+    if settlement_price <= 0:
+        return 0
+    # Convert the transaction amount to microalgos
+    if txn_amt <= 0:
+        return 0
+    # Assuming txn_amt is in units of the energy asset
+    conversion_rate = 0.9 # Example conversion rate from dollars to algos
+    settlement_price = settlement_price * conversion_rate  # Convert to microalg
+    microalgos = int(txn_amt * settlement_price * SCALING_FACTOR)
+    return microalgos
+
+def batch_txns(txns, address_to_mnemonic):
+    # Batch transactions to reduce the number of transactions sent to the network
+    if len(txns) == 0:
+        print("No transactions to batch.")
+        return FAILURE
+    batches = len(txns) // 16 + (1 if len(txns) % 16 > 0 else 0)
+    for i in range(batches):
+        batch_txns = txns[i*16:(i+1)*16]
+        if len(batch_txns) > 0:
+            # Assign a group ID to the transactions
+            gid = transaction.assign_group_id(batch_txns)
+            # Sign all transactions in the group
+            for j in range(len(batch_txns)):
+                private_key = mnemonic.to_private_key(address_to_mnemonic[batch_txns[j].sender])
+                batch_txns[j] = batch_txns[j].sign(private_key)
+            # Send the signed transaction group
+            txid = algod_client.send_transactions(batch_txns)
+    
+            # Wait for confirmation
+            try:
+                txinfo = transaction.wait_for_confirmation(algod_client, txid)
+                print(f"Batch transaction ID: {txid}")
+        
+            except Exception as e:
+                print(f"Failed to send batch transaction: {e}")
+                return FAILURE
+    return SUCCESS
+
 # Main simulation
 # Approach:
 # 1. Get ERCOT hourly demand forecast and price forecast data as the input.
@@ -291,7 +343,7 @@ def opt_in(asset_id, sellers, buyers):
 # 6. Create application call transaction to update the completed status in the smart contract.
 # 7. Trigger payments from buyers to matcher and from matcher to sellers.
 def main():
-   sellers, buyers, matcher = get_account_info()
+   sellers, buyers, matcher, address_to_mnemonic = get_account_info()
    asset_id = get_energy_asset(matcher)
    opt_in(asset_id, sellers, buyers)
    app_id = get_smart_contract(matcher)
@@ -305,7 +357,6 @@ def main():
    txn_date = txn_date.replace(hour=0, minute=0, second=0, microsecond=0)
 
    # Create the asset transactions for each hour
-   txns = []
    sender_address = None
    receiver_address = None
    txn_amt = None
@@ -313,7 +364,8 @@ def main():
        print(f"Hour {h}:")
        txn_date_str = txn_date.strftime("%Y-%m-%d %H:%M:%S")
        note_str = f"Energy transaction for hour {h} on {txn_date_str}".encode("utf-8")
-   
+       txns = []
+       payment_details = []
        for i in range(NUM_SELLERS):
            # Set the sender and receiver addresses.
            if txn_amts[h][i] <= 0:
@@ -337,39 +389,43 @@ def main():
                 sp=params
            )
            txns.append(txn)
+           microalgos = get_microalgos(txn_amt, settlement_prices[h])
+           payment_details.append((receiver_address, microalgos))
        txn_date = txn_date + timedelta(hours=1)
 
-   # Create the application call transaction
-   params = algod_client.suggested_params()
-   app_args = [str(settlement_prices[h]).encode()]
-   app_txn = transaction.ApplicationCallTxn(
-        sender=matcher['address'],
-        sp=params,
-        index=app_id,
-        on_complete=transaction.OnComplete.NoOpOC,
-        app_args=app_args
-   )
+       # Create the application call transaction to record prices
+       params = algod_client.suggested_params()
+       app_args = [b"store_price", h.to_bytes(8, "big"), int(settlement_prices[h]).to_bytes(8, "big")]
+       app_txn = transaction.ApplicationCallTxn(
+                            sender=matcher['address'],
+                            sp=params,
+                            index=app_id,
+                            on_complete=transaction.OnComplete.NoOpOC,
+                            app_args=app_args)
 
-   # Sign the application call transaction
-   txns.append(app_txn)
+       # Add the application call transaction
+       txns.append(app_txn)
+       rc1 = batch_txns(txns, address_to_mnemonic)
 
-   # Assign the group id
-   gid = transaction.assign_group_id(txns)
+       if rc1 == SUCCESS:
+           # Create the payment transactions for the matcher to sellers
+           payment_txns = []
+           for receiver_address, microalgos in payment_details:
+               if microalgos > 0:
+                    params = algod_client.suggested_params()
+                    app_args = [b"release_payment", h.to_bytes(8, "big"), decode_address(receiver_address), microalgos.to_bytes(8, "big")]
+                    app_txn = transaction.ApplicationCallTxn(
+                            sender=matcher['address'],
+                            sp=params,
+                            index=app_id,
+                            on_complete=transaction.OnComplete.NoOpOC,
+                            app_args=app_args,
+                            accounts=[receiver_address])
+                    payment_txns.append(app_txn)
 
-   # Sign all transactions in the group
-   for i in range(len(txns)):
-        private_key = mnemonic.to_private_key(matcher['Mnemonic'])
-        txns[i] = txns[i].sign(private_key)
-
-   # Send the signed transaction group
-   txid = algod_client.send_transactions(txns)
-   # Wait for confirmation
-   try:
-       txinfo = transaction.wait_for_confirmation(algod_client, txid)
-       print(f"Asset transfer transaction ID: {txid}")
-        
-   except Exception as e:
-       print(f"Failed to send transaction: {e}")
+           rc2 = batch_txns(payment_txns, address_to_mnemonic)
+           if rc2 ==FAILURE:
+               print("Failed to release payment transactions.")
 
 if __name__ == "__main__":
     main()
