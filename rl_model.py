@@ -157,14 +157,15 @@ class energy_env(gym.Env):
 
         # Check if the episode should end. We allow for at most 1000
         # steps so that imbalance and cost drop to an acceptable value.
+        best_bound_ratio = 1.0
         met_imbal_flag, imbalance_ratio = self.check_if_met_imbalance_criterion(supply, demand)
         if (self.current_step >= self.max_steps):
             self.done = True
         elif (met_imbal_flag):
-            self.done = self.check_if_met_best_bound_criterion(total_cost, self.best_bound)
+            self.done, best_bound_ratio = self.check_if_met_best_bound_criterion(total_cost, self.best_bound)
         
         # Return the state, reward, done flag, and additional info
-        return self.build_obs(), reward, self.done, {'hour': self.current_hour, 'Imbalance Ratio':imbalance_ratio, 'Total Cost': total_cost, 'Best Bound':self.best_bound, 'Settlement Price':self.perturbed_price[self.current_hour], 'Generation Amounts':gen_amts}
+        return self.build_obs(), reward, self.done, {'hour': self.current_hour, 'Imbalance Ratio':imbalance_ratio, 'Best Bound Ratio': best_bound_ratio, 'Total Cost': total_cost, 'Best Bound':self.best_bound, 'Settlement Price':self.perturbed_price[self.current_hour], 'Generation Amounts':gen_amts}
     
     def compute_reward(self, action):
         # Current hour
@@ -297,15 +298,16 @@ class energy_env(gym.Env):
 
     def check_if_met_best_bound_criterion(self, total_cost, best_bound):
         if (total_cost <= best_bound or total_cost <= 1.0):
-            return True
+            return True, 0.0
 
         denom = total_cost
         rel_gap = self.best_bound_rel_gap
+        best_bound_ratio = 1.0
         if denom > 0:
             best_bound_ratio = (total_cost - best_bound) / denom
             if best_bound_ratio <= rel_gap:
-                return True
-        return False
+                return True, best_bound_ratio
+        return False, best_bound_ratio
 
     def check_if_met_imbalance_criterion(self, supply, demand):
         # Calculate the raw supply and demand for the current hour
@@ -314,7 +316,7 @@ class energy_env(gym.Env):
         
         denom = min(demand, max_supply)
         rel_gap = self.imbalance_rel_gap
-        imbalance_ration = 0.0
+        imbalance_ratio = 1.0
         if denom > 0:
             imbalance_ratio = self.current_imbalance / denom
             if imbalance_ratio <= rel_gap:
@@ -422,6 +424,7 @@ class rl_model:
 
     def predict(self, output):
         imbalance_pcts = []
+        best_bound_pcts = []
         actions = []
         rewards = []
         total_costs = []
@@ -450,6 +453,7 @@ class rl_model:
                     # Store the results
                     actions.append(action)
                     imbalance_pcts.append(100*info[0]['Imbalance Ratio'])
+                    best_bound_pcts.append(100*info[0]['Best Bound Ratio'])
                     total_costs.append(info[0]['Total Cost'])
                     best_bounds.append(info[0]['Best Bound'])
                     settlement_prices.append(info[0]['Settlement Price'])
@@ -461,48 +465,86 @@ class rl_model:
 
         # Plot the results over steps for each hour
         if output:
-            plt.figure(figsize=(10, 5))
-            plt.subplot(3, 2, 1)
+            plt.figure(figsize=(3.5, 2.5))  # single-column IEEE size
             plt.plot(time_steps, imbalance_pcts, marker='o')
-            plt.title('Imbalance')
+            plt.title('Imbalance Gap')
             plt.xlabel('Hour')
-            plt.ylabel('Imbalance (%)')
+            plt.ylabel('Imbalance Gap (%)')
+            plt.tight_layout()
+            plt.savefig(f"imbalance_gap.pdf", dpi=300, bbox_inches='tight', pad_inches=0.01)
+            plt.close()
 
-            plt.subplot(3, 2, 2)
+            plt.figure(figsize=(3.5, 2.5))
+            plt.plot(time_steps, best_bound_pcts, marker='o')
+            plt.title('Best Bound Gap')
+            plt.xlabel('Hour')
+            plt.ylabel('Best Bound Gap (%)')
+            plt.tight_layout()
+            plt.savefig(f"best_bound_gap.pdf", dpi=300, bbox_inches='tight', pad_inches=0.01)
+            plt.close()
+
+            plt.figure(figsize=(3.5, 2.5))
             plt.plot(time_steps, self.env.envs[0].battery_bal, marker='o')
             plt.title('Battery Balance')
             plt.xlabel('Hour')
-            plt.ylabel('Battery Balance')
+            plt.ylabel('Battery Balance (MW)')
+            plt.tight_layout()
+            plt.savefig(f"battery_balance.pdf", dpi=300, bbox_inches='tight', pad_inches=0.01)
+            plt.close()
 
-            plt.subplot(3, 2, 3)
+            plt.figure(figsize=(3.5, 2.5))
             plt.plot(time_steps, self.env.envs[0].perturbed_demand[0:24], marker='o')
             plt.title('Demand')
             plt.xlabel('Hour')
-            plt.ylabel('Demand')
+            plt.ylabel('Demand (MW)')
+            plt.tight_layout()
+            plt.savefig(f"demand.pdf", dpi=300, bbox_inches='tight', pad_inches=0.01)
+            plt.close()
 
-            plt.subplot(3, 2, 4)
+            plt.figure(figsize=(3.5, 2.5))
             plt.plot(time_steps, self.env.envs[0].perturbed_price[0:24], marker='o')
             plt.title('Price')
             plt.xlabel('Hour')
-            plt.ylabel('Price')
+            plt.ylabel('Price ($/MWh)')
+            plt.tight_layout()
+            plt.savefig(f"price.pdf", dpi=300, bbox_inches='tight', pad_inches=0.01)
+            plt.close()
 
-            plt.subplot(3, 2, 5)
+            plt.figure(figsize=(3.5, 2.5))
             plt.plot(time_steps, total_costs, label='Total Cost', marker='o')
             plt.plot(time_steps, best_bounds, label='Best Bound', marker='x')
             plt.title('Total Cost vs Best Bound')
             plt.xlabel('Hour')
-            plt.ylabel('Cost')
-            plt.legend()
+            plt.ylabel('Cost ($)')
+            plt.legend(loc='best')
+            plt.tight_layout()
+            plt.savefig(f"cost.pdf", dpi=300, bbox_inches='tight', pad_inches=0.01)
+            plt.close()
 
-            plt.subplot(3, 2, 6)
-            plt.plot(time_steps, self.env.envs[0].solar_profile, label='Solar Profile', marker='o')
-            plt.plot(time_steps, self.env.envs[0].wind_profile, label='Wind Profile', marker='x')
+            plt.figure(figsize=(3.5, 2.5))
+            plt.plot(time_steps, self.env.envs[0].solar_profile, label='Solar', marker='o')
+            plt.plot(time_steps, self.env.envs[0].wind_profile, label='Wind', marker='x')
             plt.title('Renewable Profiles')
             plt.xlabel('Hour')
-            plt.ylabel('Capacity')
-
-            plt.legend()
+            plt.ylabel('Capacity (MW)')
             plt.tight_layout()
-            plt.show()
+            plt.legend(loc='best')
+            plt.savefig(f"renewable_profile.pdf", dpi=300, bbox_inches='tight', pad_inches=0.01)
+            plt.close()
+
+            solar_gen = [gen_amt[0] for gen_amt in gen_amts]
+            wind_gen = [gen_amt[1] for gen_amt in gen_amts]
+
+            plt.figure(figsize=(3.5, 2.5))
+            plt.plot(time_steps, solar_gen, label='Solar', marker='o')
+            plt.plot(time_steps, wind_gen, label='Wind', marker='x')
+            plt.title('Renewable Generation')
+            plt.xlabel('Hour')
+            plt.ylabel('Generation (MW)')
+            plt.tight_layout()
+            plt.legend(loc='best')
+            plt.savefig(f"renewable_gen.pdf", dpi=300, bbox_inches='tight', pad_inches=0.01)
+            plt.close()
+
 
         return gen_amts, settlement_prices

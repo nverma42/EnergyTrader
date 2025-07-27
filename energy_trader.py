@@ -20,6 +20,9 @@ SCALING_FACTOR = 0.001  # scale the original value
 SUCCESS = 1
 FAILURE = 0
 
+# Average block time in seconds for Algorand
+AVERAGE_BLOCK_TIME = 3.5
+
 # Replace these values with your node's address
 # free service does not require tokens
 algod_address = "https://testnet-api.4160.nodely.dev"
@@ -304,33 +307,51 @@ def get_microalgos(txn_amt, settlement_price):
     microalgos = int(txn_amt * settlement_price * SCALING_FACTOR)
     return microalgos
 
-def batch_txns(txns, address_to_mnemonic):
+def batch_txns(txns, address_to_mnemonic, perf_stats):
     # Batch transactions to reduce the number of transactions sent to the network
     if len(txns) == 0:
         print("No transactions to batch.")
         return FAILURE
     batches = len(txns) // 16 + (1 if len(txns) % 16 > 0 else 0)
+    sum_latency = 0.0
+    num_txns = 0
     for i in range(batches):
-        batch_txns = txns[i*16:(i+1)*16]
-        if len(batch_txns) > 0:
+        batch = txns[i*16:(i+1)*16]
+        if len(batch) > 0:
             # Assign a group ID to the transactions
-            gid = transaction.assign_group_id(batch_txns)
+            gid = transaction.assign_group_id(batch)
             # Sign all transactions in the group
-            for j in range(len(batch_txns)):
-                private_key = mnemonic.to_private_key(address_to_mnemonic[batch_txns[j].sender])
-                batch_txns[j] = batch_txns[j].sign(private_key)
+            for j in range(len(batch)):
+                private_key = mnemonic.to_private_key(address_to_mnemonic[batch[j].sender])
+                batch[j] = batch[j].sign(private_key)
             # Send the signed transaction group
-            txid = algod_client.send_transactions(batch_txns)
+            txid = algod_client.send_transactions(batch)
     
             # Wait for confirmation
             try:
                 txinfo = transaction.wait_for_confirmation(algod_client, txid)
                 print(f"Batch transaction ID: {txid}")
-        
+                
+                # Calculate the latency and throughput
+                confirmed_round = txinfo.get("confirmed-round")
+
+                txn_body = txinfo.get("txn", {}).get("txn", {})
+                first_valid = txn_body.get("fv")
+
+                print(f"Transaction confirmed in round {confirmed_round}")
+                print(f"First valid round was {first_valid}")
+
+                fv_time = algod_client.block_info(first_valid)["block"]["ts"]
+                confirmed_time = algod_client.block_info(confirmed_round)["block"]["ts"]
+
+                latency = confirmed_time - fv_time
+                num_txns = len(batch)
+                perf_stats.append((latency, num_txns))
             except Exception as e:
                 print(f"Failed to send batch transaction: {e}")
                 return FAILURE
-    return SUCCESS
+        
+        return SUCCESS
 
 # Main simulation
 # Approach:
@@ -360,6 +381,7 @@ def main():
    sender_address = None
    receiver_address = None
    txn_amt = None
+   perf_stats = []
    for h in range(24):
        print(f"Hour {h}:")
        txn_date_str = txn_date.strftime("%Y-%m-%d %H:%M:%S")
@@ -405,7 +427,7 @@ def main():
 
        # Add the application call transaction
        txns.append(app_txn)
-       rc1 = batch_txns(txns, address_to_mnemonic)
+       rc1 = batch_txns(txns, address_to_mnemonic, perf_stats)
 
        if rc1 == SUCCESS:
            # Create the payment transactions for the matcher to sellers
@@ -423,9 +445,20 @@ def main():
                             accounts=[receiver_address])
                     payment_txns.append(app_txn)
 
-           rc2 = batch_txns(payment_txns, address_to_mnemonic)
+           rc2 = batch_txns(payment_txns, address_to_mnemonic, perf_stats)
            if rc2 ==FAILURE:
                print("Failed to release payment transactions.")
+   # Print performance statistics
+   if perf_stats:
+         total_latency = sum(s[0] for s in perf_stats)
+         total_txns = sum(s[1] for s in perf_stats)
+         avg_latency = total_latency / total_txns if total_txns > 0 else 0
+         throughput = total_txns / avg_latency if avg_latency > 0 else 0
+         print(f"Average Latency: {avg_latency:.2f} seconds")
+         print(f"Total Transactions: {total_txns}")
+         print(f"Throughput: {throughput:.2f} transactions per second")
+   else:
+         print("No performance statistics available.")
 
 if __name__ == "__main__":
     main()
