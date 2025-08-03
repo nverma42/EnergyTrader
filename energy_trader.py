@@ -357,12 +357,11 @@ def batch_txns(txns, address_to_mnemonic, perf_stats):
 # Approach:
 # 1. Get ERCOT hourly demand forecast and price forecast data as the input.
 # 2. Train reinforcement learning model.
-# 3. Distribute hourly demand among k consumers based on a random distribution.
+# 3. Distribute hourly demand among k consumers based imbalance least cost targets.
 # 4. Get the optimal allocations from the model.
-# 5. Create asset transactions to transfer energy asset from buyers to matcher.
-# 6. Create asset transactions to transfer energy asset from matcher to sellers.
+# 5. Create asset transactions to transfer energy asset from matcher to sellers.
 # 6. Create application call transaction to update the completed status in the smart contract.
-# 7. Trigger payments from buyers to matcher and from matcher to sellers.
+# 7. Trigger payments from matcher to sellers.
 def main():
    sellers, buyers, matcher, address_to_mnemonic = get_account_info()
    asset_id = get_energy_asset(matcher)

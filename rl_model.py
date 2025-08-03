@@ -1,3 +1,4 @@
+import torch
 import random
 import pandas as pd
 import gym
@@ -7,12 +8,6 @@ import matplotlib.pyplot as plt
 from stable_baselines3 import PPO
 from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
 
-# TO DO: Add more realistic data for offers and bids
-# TO DO: Add designated agents: solar, wind, battery, traditional and 1 consumer agent.
-# Each agent takes action for each hour based on the available capacity to reduce the current future imbalance at the lowest cost.
-# TO DO: Add more realistic reward function based on future arbitrage opportunities
-# TO DO: solar and wind are free but limited, battery is expensive but can be used to store energy for future arbitrage opportunities
-# TO DO: Traditional generators are expensive and can be used to balance the grid in case of imbalance
 class energy_env(gym.Env):
     def __init__(self, params):
         super(energy_env, self).__init__()
@@ -359,7 +354,8 @@ class rl_model:
         env.seed(SEED)
         self.env = env
         self.env.reset()
-        self.policy = PPO("MlpPolicy", self.env, verbose=1, seed=SEED)
+        self.policy = PPO("MlpPolicy", self.env, verbose=1, seed=SEED, device='auto')
+        print(torch.__version__)
 
     def set_parms(self):
         params ={'min_load': 50803,  # Minimum load in MW,'
@@ -373,38 +369,6 @@ class rl_model:
                 'demand_forecast': np.zeros(48, dtype=np.float32), # 48 hours demand forecast
                 'price_forecast': np.zeros(48, dtype=np.float32), # 48 hours price forecast
                 }
-        # Fill the demand and price forecasts with some cyclical demand data
-        # hours = np.arange(0, 48)
-        # base_demand = (params['min_load'] + params['max_load']) / 2.0
-        # peak_demand = (params['max_load'] - params['min_load']) / 2.0
-        # morning_peak = 0.2 * peak_demand * np.sin(np.pi * (hours - 2) / 12) ** 2  # Peak at t=8
-        # evening_peak = peak_demand * np.sin(np.pi * (hours - 12) / 12) ** 2  # Peak at t=18
-        # demand = base_demand + 0.5 * (morning_peak + evening_peak)
-        # params['demand_forecast'] = base_demand + 0.5 * (morning_peak + evening_peak)
-        
-        # base_price = (params['min_price'] + params['max_price']) / 2.0
-        # peak_price = (params['max_price'] - params['min_price']) / 2.0
-        # price_scaling = 0.1
-        # renewable_dip = -peak_price * 0.5 * np.sin(np.pi * (hours - 10.5) / 12) ** 2
-        # price = base_price + price_scaling * (demand - base_demand) + renewable_dip
-        # params['price_forecast'] = price
-
-        # 24 hr Solar and wind profiles
-        # Solar: bell curve peaking at solar_peak_hour, zero at night
-        # hours = np.arange(0, 24)
-        # max_solar = params['max_solar']
-        # solar_peak_hour = 12  # Solar peak at noon
-        # solar_profile = max_solar * np.exp(-0.5 * ((hours - solar_peak_hour) / 3)**2)
-        # #solar_profile = np.ones(24, dtype=np.float32) * max_solar  # Initialize solar profile
-        # solar_profile[(hours < 6) | (hours > 18)] = 0  # No solar before 6 AM or after 6 PM
-        # params['solar_profile'] = solar_profile
-
-        # # Wind: more random, with a slight pattern (e.g., stronger at night/morning)
-        # max_wind = params['max_wind']
-        # base_wind = 0.5 * (np.sin((hours + 6) * np.pi / 12) + 1)  # Patterned component
-        # noise = 0.2 * np.random.randn(24)  # Random noise
-        # wind_profile = np.clip(max_wind * (base_wind + noise), 0, max_wind)
-        # params['wind_profile'] = wind_profile
 
         # Read ERCOT data 
         df = pd.read_csv('data/ERCOT Data.csv')
