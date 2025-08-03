@@ -1,0 +1,13 @@
+# Python version: 3.12.0
+# Core dependencies
+torch==2.7.0+cpu         # PyTorch (CPU-only)
+stable-baselines3==2.6.0 # RL library
+gym==0.26.2              # OpenAI Gym environment
+
+# Algorand Python SDK
+py-algorand-sdk          # Latest stable version at time of install
+
+# Other common dependencies (optional, for training/evaluation/logging)
+numpy
+pandas
+matplotlib
