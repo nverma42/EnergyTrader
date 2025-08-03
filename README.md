@@ -19,3 +19,18 @@ Ensure you are using **Python 3.12.0**.
 For CPU-only training:
 pip install torch==2.7.0+cpu --index-url https://download.pytorch.org/whl/cpu  
 pip install -r requirements.txt
+
+##  Project Structure
+The file energy_trader.py python source file contains the main driver program.  
+The file rl_model.py contains the code for training the reinforcement learning agent.    
+The file smart_contract.py contains the code for creating Algorand smart contract.  
+The data folder holds Algorand keys, mnemonics, and ERCOT data files.
+
+## Approach
+1. Get ERCOT hourly demand forecast and price forecast data as the input.  
+2. Train reinforcement learning model.  
+3. Distribute hourly demand among k consumers based imbalance least cost targets.  
+4. Get the optimal allocations from the model.  
+5. Create asset transactions to transfer energy asset from matcher to sellers.  
+6. Create application call transaction to update the completed status in the smart contract.  
+7. Trigger payments from matcher to sellers.  
