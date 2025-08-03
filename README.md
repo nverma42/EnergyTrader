@@ -24,10 +24,10 @@ pip install -r requirements.txt
 The file energy_trader.py python source file contains the main driver program.  
 The file rl_model.py contains the code for training the reinforcement learning agent.    
 The file smart_contract.py contains the code for creating Algorand smart contract.  
-The file Fund Account.py is a utility file to transfer alogs between accounts.
-The file Delete App.py is a utility file to delete the existing smart contract.
-The file Delete Asset.py is a utility file to delete asset in Algorand.
-The data folder holds Algorand keys, mnemonics, and ERCOT data files.
+The file Fund Account.py is a utility file to transfer alogs between accounts.  
+The file Delete App.py is a utility file to delete the existing smart contract.  
+The file Delete Asset.py is a utility file to delete asset in Algorand.  
+The data folder holds Algorand keys, mnemonics, and ERCOT data files.  
 
 
 ### Approach
