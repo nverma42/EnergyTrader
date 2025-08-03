@@ -17,5 +17,5 @@ Ensure you are using **Python 3.12.0**.
 
 ### Install dependencies
 For CPU-only training:
-pip install torch==2.7.0+cpu --index-url https://download.pytorch.org/whl/cpu
+pip install torch==2.7.0+cpu --index-url https://download.pytorch.org/whl/cpu  
 pip install -r requirements.txt
