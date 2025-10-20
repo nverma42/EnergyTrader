@@ -99,8 +99,8 @@ class energy_env(gym.Env):
         self.current_imbalance = 0.0
         self.best_bound = 0.0
         self.done = False
-        demand_noise = np.random.normal(0, 2, size=self.demand.shape)  # std dev = 2 MW
-        price_noise = np.random.normal(0, 0.1, size=self.price.shape)  # std dev = 0.1 $/MWh
+        demand_noise = np.random.normal(0, 500, size=self.demand.shape)  # std dev = 500 MW
+        price_noise = np.random.normal(0, 1, size=self.price.shape)  # std dev = 1 $/MWh
         self.perturbed_demand = np.clip(self.demand + demand_noise, self.min_demand, self.max_demand)
         self.perturbed_price = np.clip(self.price + price_noise, self.min_price, self.max_price)
 
@@ -339,12 +339,8 @@ class energy_env(gym.Env):
         return best_bound
 
 class rl_model:
-    def __init__(self):
-        # Initialize the seed for reproducibility
-
-        SEED = 42
+    def __init__(self, SEED=42):
         # Fill the demand and price forecasts with some dummy data
-        # TO DO: Add ERCOT demand and price forecasts
         parms = self.set_parms()
 
         env = lambda: energy_env(parms)
@@ -387,8 +383,8 @@ class rl_model:
             self.policy.learn(total_timesteps=timesteps, reset_num_timesteps=False)
 
     def predict(self, output):
-        imbalance_pcts = []
-        best_bound_pcts = []
+        imbalance_gap = []
+        best_bound_gap = []
         actions = []
         rewards = []
         total_costs = []
@@ -416,8 +412,8 @@ class rl_model:
                 if (done):
                     # Store the results
                     actions.append(action)
-                    imbalance_pcts.append(100*info[0]['Imbalance Ratio'])
-                    best_bound_pcts.append(100*info[0]['Best Bound Ratio'])
+                    imbalance_gap.append(100*info[0]['Imbalance Ratio'])
+                    best_bound_gap.append(100*info[0]['Best Bound Ratio'])
                     total_costs.append(info[0]['Total Cost'])
                     best_bounds.append(info[0]['Best Bound'])
                     settlement_prices.append(info[0]['Settlement Price'])
@@ -430,7 +426,7 @@ class rl_model:
         # Plot the results over steps for each hour
         if output:
             plt.figure(figsize=(3.5, 2.5))  # single-column IEEE size
-            plt.plot(time_steps, imbalance_pcts, marker='o')
+            plt.plot(time_steps, imbalance_gap, marker='o')
             plt.title('Imbalance Gap')
             plt.xlabel('Hour')
             plt.ylabel('Imbalance Gap (%)')
@@ -439,7 +435,7 @@ class rl_model:
             plt.close()
 
             plt.figure(figsize=(3.5, 2.5))
-            plt.plot(time_steps, best_bound_pcts, marker='o')
+            plt.plot(time_steps, best_bound_gap, marker='o')
             plt.title('Best Bound Gap')
             plt.xlabel('Hour')
             plt.ylabel('Best Bound Gap (%)')
@@ -510,5 +506,18 @@ class rl_model:
             plt.savefig(f"renewable_gen.pdf", dpi=300, bbox_inches='tight', pad_inches=0.01)
             plt.close()
 
-
-        return gen_amts, settlement_prices
+        # Set the output dictionary
+        output_dict = {
+            'Imbalance Gap': imbalance_gap,
+            'Best Bound Gap': best_bound_gap,
+            'Battery Balance': self.env.envs[0].battery_bal.tolist(),
+            'Demand': self.env.envs[0].perturbed_demand[0:24].tolist(),
+            'Price': self.env.envs[0].perturbed_price[0:24].tolist(),
+            'Total Costs': total_costs,
+            'Best Bounds': best_bounds,
+            'Solar Generation': [gen_amt[0] for gen_amt in gen_amts],
+            'Wind Generation': [gen_amt[1] for gen_amt in gen_amts],
+            'Settlement Prices': settlement_prices,
+            'Generation Amounts': gen_amts
+        }
+        return output_dict

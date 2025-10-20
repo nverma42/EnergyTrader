@@ -371,7 +371,10 @@ def main():
    # Initialize the matcher, train and simulate
    model = rl_model()
    model.train()
-   txn_amts, settlement_prices = model.predict(True)
+   outputs = model.predict(True)
+
+   txn_amts = outputs['Generation Amounts']
+   settlement_prices = outputs['Settlement Prices']
 
    txn_date = datetime.now()
    txn_date = txn_date.replace(hour=0, minute=0, second=0, microsecond=0)
