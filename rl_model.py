@@ -1,3 +1,4 @@
+from math import inf
 from re import S
 import torch
 import random
@@ -345,6 +346,7 @@ class safe_energy_env(gym.Wrapper):
     def step(self, action):
         # Optimize action using QP or other methods to ensure safety
         modified_action = self.optimize_action(action)
+        #modified_action = action  # For now, we are not modifying the action. The optimize_action function can be implemented to modify the action based on safety constraints.
 
         # Call the parent step function
         obs, reward, done, info = self.env.step(modified_action)
@@ -353,13 +355,14 @@ class safe_energy_env(gym.Wrapper):
 
     def optimize_action(self,  action):
         # Set objective function for QP
-        P = 2.0 * sp.identity(4, format='csc')
+        n = 4  # Number of action variables
+        P = sp.diags([2.0, 2.0, 3.0, 2.0], format='csc')  # Quadratic cost for deviation from original action   
         q = -2.0 * np.array(action)
-        
+       
         h = self.env.current_hour
 
         # Contraction Factor: Imbalance/total cost must shrink to at least 95% of previous value
-        rho = 0.95
+        rho = 0.90
         
         demand = self.env.perturbed_demand[h]
         prev_imbalance = self.env.prev_imbalance
@@ -375,19 +378,17 @@ class safe_energy_env(gym.Wrapper):
         l_bounds = []
         u_bounds = []
 
-        # Set the Lapunov constraints for convergence to lower imbalance.
-        # |Generation - Demand| <= rho * previous imbalance
-        if (prev_imbalance > 0.0):
-            lp_row = [solar_profile, wind_profile, battery_cap, conv_profile]
-            lp_row_lb = demand - rho * prev_imbalance
-            lp_row_ub = demand + rho * prev_imbalance
-            constraints.append(lp_row)
-            l_bounds.append(lp_row_lb)
-            u_bounds.append(lp_row_ub)
-        
+        # Safety constraint to ensure that the supply meets the demand: solar + wind + battery + conv = demand
+        lp_row = [solar_profile, wind_profile, battery_cap, conv_profile]
+        lp_row_lb = demand
+        lp_row_ub = demand
+        constraints.append(lp_row)
+        l_bounds.append(lp_row_lb)
+        u_bounds.append(lp_row_ub)
+
         # Add the battery limits as CBF constraints for safe battery operation
         # 0 <= previous balance + battery charge /discharge <= battery_capacity
-        bl_row = [0, 0, battery_cap, 0]
+        bl_row = [0, 0, battery_cap, 0.0]
         bl_row_lb = 0.0 - battery_bal
         bl_row_ub = battery_cap - battery_bal
         constraints.append(bl_row)
@@ -446,7 +447,7 @@ class safe_energy_env(gym.Wrapper):
         prob = osqp.OSQP()
         prob.setup(P=P, q=q, A=A, l=l, u=u)
         sol = prob.solve()
-        return (sol.x)
+        return (sol.x[0:n])
 
 
 class rl_model:
@@ -488,7 +489,7 @@ class rl_model:
         return params
 
     def train(self):
-        curriculum = [(0.40, 0.40, 40000), (0.20, 0.30, 50000), (0.10, 0.20, 60000), (0.05, 0.10, 80000), (0.02, 0.05, 100000)]
+        curriculum = [(0.40, 0.40, 40000), (0.20, 0.30, 50000), (0.10, 0.20, 60000), (0.05, 0.10, 80000), (0.02, 0.05, 100000), (0.01, 0.01, 100000)]
         for level, (imbal_rel_gap, best_bound_rel_gap, timesteps) in enumerate(curriculum):
             self.env.envs[0].set_rel_gap(imbal_rel_gap, best_bound_rel_gap)
             self.policy.learn(total_timesteps=timesteps, reset_num_timesteps=False)
@@ -511,7 +512,7 @@ class rl_model:
             done = False
             # Reset the environment for each hour & build observations
             self.env.envs[0].set_state(hour)
-            self.env.envs[0].set_rel_gap(0.02, 0.05)
+            self.env.envs[0].set_rel_gap(0.01, 0.01)
             obs = self.env.envs[0].build_obs()
             while (True):
                 if (obs.ndim == 1):
