@@ -1,9 +1,9 @@
-from asyncio import windows_events
-from encodings.cp437 import decoding_map
-from sqlite3 import SQLITE_OK_LOAD_PERMANENTLY
 from rl_model import rl_model
 import numpy as np
 import matplotlib.pyplot as plt
+import random
+import argparse
+import threading
 
 def plot_series1(time_steps, mean, std, minval, maxval, title, xlabel, ylabel, filename):
     plt.plot(time_steps, mean, label=title)
@@ -12,7 +12,6 @@ def plot_series1(time_steps, mean, std, minval, maxval, title, xlabel, ylabel, f
     plt.ylabel(ylabel)
     plt.legend()
     plt.savefig(filename, dpi=300, bbox_inches='tight', pad_inches=0.01)
-    plt.show()
     plt.close()
 
 def plot_series2(time_steps, label1, mean1, std1, minval1, maxval1, label2, mean2, std2, minval2, maxval2, title, xlabel, ylabel, filename):
@@ -24,7 +23,6 @@ def plot_series2(time_steps, label1, mean1, std1, minval1, maxval1, label2, mean
     plt.ylabel(ylabel)
     plt.legend()
     plt.savefig(filename, dpi=300, bbox_inches='tight', pad_inches=0.01)
-    plt.show()
     plt.close()
 
 def plot_series3(time_steps, label1, mean1, std1, minval1, maxval1, label2, mean2, std2, minval2, maxval2, title, xlabel, ylabel, filename):
@@ -41,30 +39,11 @@ def plot_series3(time_steps, label1, mean1, std1, minval1, maxval1, label2, mean
     ax2.legend(loc='upper right')
         
     plt.savefig(filename, dpi=300, bbox_inches='tight', pad_inches=0.01)
-    plt.show()
     plt.close()
-import random
 
-# Fix the random generator so sampling is reproducible
-random.seed(0)  
-
-# Sample 10 seeds from a large range (e.g., 0 to 9999)
-num_seeds = 10
-seeds = random.sample(range(0, 10000), num_seeds)
-
-imbalance_gap = [[] for _ in range(num_seeds)]
-best_bound_gap = [[] for _ in range(num_seeds)]
-battery_bal = [[] for _ in range(num_seeds)]
-demand = [[] for _ in range(num_seeds)]
-price = [[] for _ in range(num_seeds)]
-total_costs = [[] for _ in range(num_seeds)]
-best_bounds = [[] for _ in range(num_seeds)]
-solar_gen = [[] for _ in range(num_seeds)]
-wind_gen = [[] for _ in range(num_seeds)]
-i = 0
-for seed in seeds:
-    model = rl_model(seed)
-    outputs = model.predict(False)
+def evaluate_seed(i, seed, model, imbalance_gap, best_bound_gap, battery_bal, demand, price, total_costs, best_bounds, solar_gen, wind_gen):
+    print(f"Evaluating on seed {i+1}: {seed}")
+    outputs = model.predict(False, seed=seed)
     imbalance_gap[i] = outputs['Imbalance Gap']
     best_bound_gap[i] = outputs['Best Bound Gap']
     battery_bal[i] = outputs['Battery Balance']
@@ -74,9 +53,47 @@ for seed in seeds:
     best_bounds[i] = outputs['Best Bounds']
     solar_gen[i] = outputs['Solar Generation']
     wind_gen[i] = outputs['Wind Generation']
+    print(f"Completed seed {i+1}: {seed}")
 
-    i += 1
+# Fix the random generator so sampling is reproducible
+random.seed(0)
+np.random.seed(0)
 
+# Parse command line arguments
+parser = argparse.ArgumentParser(description='Evaluate RL model performance with or without safety layer')
+parser.add_argument('--seed', type=int, default=42, help='Training seed (default: 42)')
+parser.add_argument('--safety', type=int, default=1, help='Enable safety layer (default: 1)')
+parser.add_argument('--num_seeds', type=int, default=1, help='Number of evaluation seeds (default: 10)')
+
+args = parser.parse_args()
+
+ENABLE_SAFETY_LAYER = args.safety
+TRAINING_SEED = args.seed
+NUM_SEEDS = args.num_seeds
+
+# Train model ONCE on a single seed
+print("Training model...")
+training_seed = TRAINING_SEED
+model = rl_model(training_seed, ENABLE_SAFETY_LAYER)
+model.train()
+print("Training complete!") 
+
+# Sample seeds from a large range (e.g., 0 to 9999)
+seeds = random.sample(range(0, 10000), NUM_SEEDS)
+
+imbalance_gap = [[] for _ in range(NUM_SEEDS)]
+best_bound_gap = [[] for _ in range(NUM_SEEDS)]
+battery_bal = [[] for _ in range(NUM_SEEDS)]
+demand = [[] for _ in range(NUM_SEEDS)]
+price = [[] for _ in range(NUM_SEEDS)]
+total_costs = [[] for _ in range(NUM_SEEDS)]
+best_bounds = [[] for _ in range(NUM_SEEDS)]
+solar_gen = [[] for _ in range(NUM_SEEDS)]
+wind_gen = [[] for _ in range(NUM_SEEDS)]
+
+for i, seed in enumerate(seeds):
+    evaluate_seed(i, seed, model, imbalance_gap, best_bound_gap, battery_bal, demand, price, total_costs, best_bounds, solar_gen, wind_gen)
+print("Computing statistics...")
 time_steps = np.arange(len(imbalance_gap[0]))
 avg_imbalance_gap = np.mean(imbalance_gap, axis=0)
 avg_best_bound_gap = np.mean(best_bound_gap, axis=0)
@@ -118,13 +135,15 @@ max_best_bounds = np.max(best_bounds, axis=0)
 max_solar_gen = np.max(solar_gen, axis=0)
 max_wind_gen = np.max(wind_gen, axis=0)
 
-plot_series1(time_steps, avg_imbalance_gap, std_imbalance_gap, min_imbalance_gap, max_imbalance_gap, "Avg Imbalance Gap", "Hour", "Imbalance Gap (%)", "avg_imbalance_gap.pdf")
-plot_series1(time_steps, avg_best_bound_gap, std_best_bound_gap, min_best_bound_gap, max_best_bound_gap, "Avg Best Bound Gap", "Hour", "Best Bound Gap (%)", "avg_best_bound_gap.pdf")
-plot_series1(time_steps, avg_battery_bal, std_battery_bal, min_battery_bal, max_battery_bal, "Avg Battery Balance", "Hour", "Battery Balance (MW)", "avg_battery_bal.pdf")
-plot_series1(time_steps, avg_demand, std_demand, min_demand, max_demand, "Avg Demand", "Hour", "Demand (MW)", "avg_demand.pdf")
-plot_series1(time_steps, avg_price, std_price, min_price, max_price, "Avg Price", "Hour", "Price ($/MWh)", "avg_price.pdf")
-plot_series2(time_steps, 'Avg Total Cost', avg_total_costs, std_total_costs, min_total_costs, max_total_costs, "Avg Best Bound", avg_best_bounds, std_best_bounds, min_best_bounds, max_best_bounds, "Avg Total Cost vs Avg Best Bound", "Hour", "Cost ($)", "avg_cost.pdf")
-plot_series2(time_steps, 'Avg Solar', avg_solar_gen, std_solar_gen, min_solar_gen, max_solar_gen, "Avg Wind", avg_wind_gen, std_wind_gen, min_wind_gen, max_wind_gen, "Renewable Generation", "Hour", "Generation (MW)", "avg_renewable_gen.pdf")
-plot_series3(time_steps, 'Avg Price', avg_price, std_price, min_price, max_price, 'Avg Battery Balance', avg_battery_bal, std_battery_bal, min_battery_bal, max_battery_bal, "Avg Price vs Battery Balance", "Hour", "Price ($/MWh)", "avg_price_battery_bal.pdf")
+print("Generating plots...")
+plot_series1(time_steps, avg_imbalance_gap, std_imbalance_gap, min_imbalance_gap, max_imbalance_gap, "Avg Imbalance Gap", "Hour", "Imbalance Gap (%)", f"avg_imbalance_gap_{ENABLE_SAFETY_LAYER}.pdf")
+plot_series1(time_steps, avg_best_bound_gap, std_best_bound_gap, min_best_bound_gap, max_best_bound_gap, "Avg Best Bound Gap", "Hour", "Best Bound Gap (%)", f"avg_best_bound_gap_{ENABLE_SAFETY_LAYER}.pdf")
+plot_series1(time_steps, avg_battery_bal, std_battery_bal, min_battery_bal, max_battery_bal, "Avg Battery Balance", "Hour", "Battery Balance (MW)", f"avg_battery_bal_{ENABLE_SAFETY_LAYER}.pdf")
+plot_series1(time_steps, avg_demand, std_demand, min_demand, max_demand, "Avg Demand", "Hour", "Demand (MW)", f"avg_demand_{ENABLE_SAFETY_LAYER}.pdf")
+plot_series1(time_steps, avg_price, std_price, min_price, max_price, "Avg Price", "Hour", "Price ($/MWh)", f"avg_price_{ENABLE_SAFETY_LAYER}.pdf")
+plot_series2(time_steps, 'Avg Total Cost', avg_total_costs, std_total_costs, min_total_costs, max_total_costs, "Avg Best Bound", avg_best_bounds, std_best_bounds, min_best_bounds, max_best_bounds, "Avg Total Cost vs Avg Best Bound", "Hour", "Cost ($)", f"avg_cost_{ENABLE_SAFETY_LAYER}.pdf")
+plot_series2(time_steps, 'Avg Solar', avg_solar_gen, std_solar_gen, min_solar_gen, max_solar_gen, "Avg Wind", avg_wind_gen, std_wind_gen, min_wind_gen, max_wind_gen, "Renewable Generation", "Hour", "Generation (MW)", f"avg_renewable_gen_{ENABLE_SAFETY_LAYER}.pdf")
+plot_series3(time_steps, 'Avg Price', avg_price, std_price, min_price, max_price, 'Avg Battery Balance', avg_battery_bal, std_battery_bal, min_battery_bal, max_battery_bal, "Avg Price vs Battery Balance", "Hour", "Price ($/MWh)", f"avg_price_battery_bal_{ENABLE_SAFETY_LAYER}.pdf")
+print("Done!")
 
 

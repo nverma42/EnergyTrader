@@ -35,11 +35,12 @@ class energy_env(gym.Env):
         self.battery_capacity = params['battery_capacity']
         self.conv_profile = params['conv_profile']
         self.battery_bal = np.zeros((24,), dtype=np.float32)  # Battery balance for each hour
-        self.best_bound = 0.0
+        self.use_dynamic_best_bound = False  # Flag to switch between dynamic best bound calculation and pre-computed best bounds
+        self.best_bounds = self.compute_best_bounds() # Pre-compute best bounds for all hours
         self.prev_imbalance = 0.0
         self.prev_total_cost = 0.0
         self.current_step = 0
-        self.max_steps = 50000
+        self.max_steps = 5000
         self.imbalance_rel_gap = 0.25
         self.best_bound_rel_gap = 0.25
 
@@ -63,7 +64,7 @@ class energy_env(gym.Env):
                               np.ones(6, dtype=np.float32) * self.min_price,
                               ])
         
-        max_demand = params['max_load'] + params['battery_capacity']   # Total demand including battery capacity
+        max_demand = self.max_demand + self.battery_capacity   # Total demand including battery capacity
         obs_high = np.concatenate([np.array([1.0], dtype=np.float32),
                                    np.array([1.0], dtype=np.float32),
                                    np.array([self.max_solar], dtype=np.float32),
@@ -80,10 +81,6 @@ class energy_env(gym.Env):
         self.done = False
         self.penalty = params['max_price']  # Penalty
     
-    def seed(self, seed=None):
-        random.seed(seed)
-        np.random.seed(seed)
-
     # Set the hour, imbalance and reset the battery balance for the new hour
     def set_state(self, h):
         self.current_hour = h
@@ -97,10 +94,17 @@ class energy_env(gym.Env):
         self.imbalance_rel_gap = imbalance_rel_gap
         self.best_bound_rel_gap = best_bound_rel_gap
 
+    def seed(self, seed=None):
+        """Set the seed for numpy and random global state."""
+        if seed is None:
+            seed = np.random.randint(0, 2**32 - 1)
+        np.random.seed(seed)
+        random.seed(seed)
+        return [seed]
+
     # For realistic simulation, check https://www.ercot.com/gridmktinfo/dashboards/
-    # TO DO: slightly perturb the hour, demand and price forecasts to simulate realistic scenarios
     def reset(self):
-        self.current_hour = np.random.randint(0,24)  # Randomly select an hour to start the episode
+        self.current_hour = np.random.randint(0, 24)  # Uses global state
         self.current_imbalance = 0.0
         self.best_bound = 0.0
         self.done = False
@@ -112,7 +116,10 @@ class energy_env(gym.Env):
         # Clip to min/max bounds
         self.perturbed_demand = np.clip(self.perturbed_demand, self.min_demand, self.max_demand)
         self.perturbed_price = np.clip(self.perturbed_price, self.min_price, self.max_price)
-        
+
+        if self.use_dynamic_best_bound:
+            self.best_bounds = self.compute_best_bounds()
+
         # Set prev variables
         self.prev_imbalance = 0.0
         self.prev_total_cost = 0.0
@@ -130,11 +137,11 @@ class energy_env(gym.Env):
         available_solar = self.solar_profile[h]  # Solar generation for the current hour
         available_wind = self.wind_profile[h]    # Wind generation for the current hour
         imbalance_t = self.current_imbalance
-        best_bound_t = self.best_bound
+        best_bound_t = self.best_bounds[h]  # Use the pre-calculated best bound for the hour
         demand_t = self.perturbed_demand[h]  # Demand forecast for the current hour
         price_t = self.perturbed_price[h]  # Price forecast for the current hour
-        demand_forecast = self.demand[h:h+6]  # Future demand forecast from current hour to end of day
-        price_forecast = self.price[h:h+6]    # Future price forecast from current hour to end of day
+        demand_forecast = self.perturbed_demand[h:h+6]  # Future demand forecast from current hour to end of day
+        price_forecast = self.perturbed_price[h:h+6]    # Future price forecast from current hour to end of day
         obs = np.concatenate([np.array([hour_cos_t], dtype=np.float32),
                               np.array([hour_sin_t], dtype=np.float32),
                               np.array([available_solar], dtype=np.float32),
@@ -155,14 +162,14 @@ class energy_env(gym.Env):
         # Compute reward
         reward, supply, demand, total_cost, gen_amts = self.compute_reward(action)
 
-        # Check if the episode should end. We allow for at most 50,000
+        # Check if the episode should end. We allow for at most 5000
         # steps so that imbalance and cost drop to an acceptable value.
         met_imbal_flag, imbalance_ratio = self.check_if_met_imbalance_criterion(supply, demand)
-        met_best_bound_flag, best_bound_ratio = self.check_if_met_best_bound_criterion(total_cost, self.best_bound)
+        met_best_bound_flag, best_bound_ratio = self.check_if_met_best_bound_criterion(total_cost, self.best_bounds[self.current_hour])
         self.done = (met_imbal_flag and met_best_bound_flag) or (self.current_step >= self.max_steps)
             
         # Return the state, reward, done flag, and additional info
-        return self.build_obs(), reward, self.done, {'hour': self.current_hour, 'Imbalance Ratio':imbalance_ratio, 'Best Bound Ratio': best_bound_ratio, 'Total Cost': total_cost, 'Best Bound':self.best_bound, 'Settlement Price':self.perturbed_price[self.current_hour], 'Generation Amounts':gen_amts}
+        return self.build_obs(), reward, self.done, {'hour': self.current_hour, 'Imbalance Ratio':imbalance_ratio, 'Best Bound Ratio': best_bound_ratio, 'Total Cost': total_cost, 'Best Bound':self.best_bounds[self.current_hour], 'Settlement Price':self.perturbed_price[self.current_hour], 'Generation Amounts':gen_amts}
     
     def compute_reward(self, action):
         # Current hour
@@ -240,7 +247,11 @@ class energy_env(gym.Env):
         # Calculate the generation and battery operation costs
         solar_cost = 0.0
         wind_cost = 0.0
-        battery_cost = abs(battery_gen) * self.min_price
+
+        battery_cost = 0.0
+        if (battery_gen < 0.0):
+            battery_cost = abs(battery_gen) * 0.4 * (self.max_price - self.min_price)
+
         conv_cost = conv_gen * self.perturbed_price[h]
         total_cost = solar_cost + wind_cost + battery_cost + conv_cost
         reward -= total_cost # cost of generation
@@ -253,9 +264,6 @@ class energy_env(gym.Env):
         profit = self.calc_arbitrage_bonus(battery_gen)
         reward += profit
         # --- end of future arbitrage reward ---
-
-        self.best_bound = self.calc_best_bound(demand)
-        self.best_bound += battery_cost
 
         # Update previous imbalance and total cost
         self.prev_imbalance = self.current_imbalance
@@ -320,25 +328,100 @@ class energy_env(gym.Env):
                 return True, imbalance_ratio
         return False, imbalance_ratio
 
-    # Merit order calculation for the best bound for the cost.
-    # This is used to calculate the lowest possible cost to meet the demand
-    def calc_best_bound(self, demand):
-        # calculate the lowest possible cost to meet the demand
-        h = self.current_hour
-        price = self.perturbed_price[h]
-        # Calculate the best bound using resource merit order
-        best_bound = 0.0
-        supplies = [self.solar_profile[h], self.wind_profile[h], self.conv_profile[h]]
-        prices = [0.0, 0.0, self.perturbed_price[h]]
-        rem_demand = demand
-        for k in range(len(supplies)):
-            if (supplies[k] < rem_demand):
-                best_bound += supplies[k] * prices[k]
-                rem_demand -= supplies[k]
-            else:
-                best_bound += rem_demand * prices[k]
-                break
-        return best_bound
+    def compute_best_bounds(self):
+        # Solve the optimization problem to find the best bound for each hour and set it as the initial best bound for the environment
+        n = 24*6  # Number of action variables for 24 hours with 6 resources with 3 variables reserved for battery charge/discharge/SoC
+        P = sp.csc_matrix((n, n))  # Quadratic Cost for solar, wind, battery, conv
+        q = np.zeros(n)  # Linear cost for solar, wind, battery, conv
+        
+        constraints = []
+        lb = []
+        ub = []
+        i = 0
+        max_price = self.max_price
+        min_price = self.min_price
+        for h in range(24):
+            q[i] = 0.0  # Solar cost
+            q[i+1] = 0.0  # Wind cost
+            q[i+2] = 0.0  # Battery charge cost
+            q[i+3] = 0.4 * (max_price  - min_price)  # Battery discharge cost
+            q[i+4] = self.perturbed_price[h]  # Conv cost
+            q[i+5] = 0.0  # Battery SoC variable has no cost
+
+            bound_row_solar = np.zeros(n)
+            bound_row_solar[i] = 1.0
+            constraints.append(bound_row_solar)
+            lb.append(0.0)
+            ub.append(self.solar_profile[h])
+
+            bound_row_wind = np.zeros(n)
+            bound_row_wind[i+1] = 1.0
+            constraints.append(bound_row_wind)
+            lb.append(0.0)
+            ub.append(self.wind_profile[h])
+
+            bound_row_battery_charge = np.zeros(n)
+            bound_row_battery_charge[i+2] = 1.0
+            bound_row_battery_charge[i+5] = 1.0
+            constraints.append(bound_row_battery_charge)
+            lb.append(0.0)
+            ub.append(self.battery_capacity)
+
+            bound_row_battery_discharge = np.zeros(n)
+            bound_row_battery_discharge[i+3] = -1.0
+            bound_row_battery_discharge[i+5] = 1.0
+            constraints.append(bound_row_battery_discharge)
+            lb.append(0.0)
+            ub.append(self.battery_capacity)
+
+            bound_row_conv = np.zeros(n)
+            bound_row_conv[i+4] = 1.0
+            constraints.append(bound_row_conv)
+            lb.append(0.0)
+            ub.append(self.conv_profile[h])
+            
+            # Add energy balance constraints for each hour
+            energy_balance_row = np.zeros(n)
+            energy_balance_row[i] = 1.0  # Solar
+            energy_balance_row[i+1] = 1.0  # Wind
+            energy_balance_row[i+2] = -1.0  # Battery charge
+            energy_balance_row[i+3] = 1.0  # Battery discharge
+            energy_balance_row[i+4] = 1.0  # Conv
+            lb.append(self.perturbed_demand[h])
+            ub.append(self.perturbed_demand[h])
+            constraints.append(energy_balance_row)
+
+            # Add battery balance constraints for each hour
+            if h >= 1:
+                battery_balance_row = np.zeros(n)
+                battery_balance_row[i-6+5] = 1.0  # Previous hour battery SoC
+                battery_balance_row[i+2] = 1.0  # Current hour battery charge
+                battery_balance_row[i+3] = -1.0  # Current hour battery discharge
+                battery_balance_row[i+5] = -1.0  # Current hour battery SoC
+                lb.append(0.0)
+                ub.append(0.0)
+                constraints.append(battery_balance_row)
+
+            i += 6  # Move to the next hour's variables
+
+        # Solve the QP to find the best dispatch for each hour
+        A = sp.csc_matrix(constraints)
+        l = np.array(lb)
+        u = np.array(ub)
+
+        prob = osqp.OSQP()
+        prob.setup(P=P, q=q, A=A, l=l, u=u)
+        sol = prob.solve()
+        
+        # Calculate the best bound for each hour based on the optimal dispatch
+        i = 0
+        best_bounds = []
+        for h in range(24):
+            best_bound = q[i] * sol.x[i] + q[i+1] * sol.x[i+1] + q[i+2] * sol.x[i+2] + q[i+3] * sol.x[i+3] + q[i+4] * sol.x[i+4]
+            best_bounds.append(best_bound)
+            i += 6
+
+        return best_bounds
 
 class safe_energy_env(gym.Wrapper):
     def __init__(self, env):
@@ -346,33 +429,37 @@ class safe_energy_env(gym.Wrapper):
     def step(self, action):
         # Optimize action using QP or other methods to ensure safety
         modified_action = self.optimize_action(action)
-        #modified_action = action  # For now, we are not modifying the action. The optimize_action function can be implemented to modify the action based on safety constraints.
 
+        # Calculate penalty for unsafe actions
+        deviation = np.linalg.norm(action - modified_action)
+        penalty = -10 * deviation**2 if deviation > 0.01 else 0
+        
         # Call the parent step function
         obs, reward, done, info = self.env.step(modified_action)
-        # Additional safety checks or modifications can be added here
+        reward += penalty
+    
         return obs, reward, done, info
 
     def optimize_action(self,  action):
         # Set objective function for QP
         n = 4  # Number of action variables
-        P = sp.diags([2.0, 2.0, 3.0, 2.0], format='csc')  # Quadratic cost for deviation from original action   
+        P = sp.diags([2.0, 2.0, 2.0, 2.0], format='csc')  # Quadratic cost for deviation from original action   
         q = -2.0 * np.array(action)
        
         h = self.env.current_hour
 
         # Contraction Factor: Imbalance/total cost must shrink to at least 95% of previous value
-        rho = 0.90
+        rho = 0.95
         
         demand = self.env.perturbed_demand[h]
         prev_imbalance = self.env.prev_imbalance
         prev_total_cost = self.env.prev_total_cost
         battery_bal = self.env.battery_bal[h-1] if h >=1 else 0.0
 
-        solar_profile = self.solar_profile[h]
-        wind_profile = self.wind_profile[h]
-        battery_cap = self.battery_capacity
-        conv_profile = self.conv_profile[h]
+        solar_profile = self.env.solar_profile[h]
+        wind_profile = self.env.wind_profile[h]
+        battery_cap = self.env.battery_capacity
+        conv_profile = self.env.conv_profile[h]
 
         constraints = []
         l_bounds = []
@@ -445,17 +532,24 @@ class safe_energy_env(gym.Wrapper):
         u = np.array(u_bounds)
 
         prob = osqp.OSQP()
-        prob.setup(P=P, q=q, A=A, l=l, u=u)
+        prob.setup(
+            P=P, q=q, A=A, l=l, u=u,
+            verbose=False, # Critical: no printing
+            eps_abs=1e-3, # Slightly loose tolerance
+            eps_rel=1e-3,  
+            max_iter=2000, # Maximum number of iterations
+            polish=False, # Do not perform polishing
+            warm_start=True, # Start from the previous solution (if available
+        )
         sol = prob.solve()
         return (sol.x[0:n])
 
-
 class rl_model:
-    def __init__(self, SEED=42):
+    def __init__(self, SEED=42, enable_safety=False):
         # Fill the demand and price forecasts with some dummy data
         parms = self.set_parms()
         # Create the environment by wrapping the energy environment with safety wrapper
-        env = lambda: safe_energy_env(energy_env(parms))
+        env = lambda: safe_energy_env(energy_env(parms)) if enable_safety else energy_env(parms)
         env = DummyVecEnv([env])
         env.seed(SEED)
         env = VecNormalize(env, norm_obs=True, norm_reward=True)
@@ -486,15 +580,22 @@ class rl_model:
         params['wind_profile'] = df['Wind'].values[0:24]
         max_conv = df['Capacity'].values - (df['Solar'].values + df['Wind'].values)
         params['conv_profile'] = max_conv[0:24]
+
         return params
 
     def train(self):
-        curriculum = [(0.40, 0.40, 40000), (0.20, 0.30, 50000), (0.10, 0.20, 60000), (0.05, 0.10, 80000), (0.02, 0.05, 100000), (0.01, 0.01, 100000)]
+
+        curriculum = [
+            (0.40, 0.80, 15000),
+            (0.20, 0.50, 20000),
+            (0.05, 0.25, 25000),
+            (0.01, 0.05, 30000),
+        ]
         for level, (imbal_rel_gap, best_bound_rel_gap, timesteps) in enumerate(curriculum):
             self.env.envs[0].set_rel_gap(imbal_rel_gap, best_bound_rel_gap)
             self.policy.learn(total_timesteps=timesteps, reset_num_timesteps=False)
 
-    def predict(self, output):
+    def predict(self, output, seed=None):
         imbalance_gap = []
         best_bound_gap = []
         actions = []
@@ -504,6 +605,13 @@ class rl_model:
         settlement_prices = []
         time_steps = []
         gen_amts = []
+
+        if (seed is not None):
+            self.env.seed(seed)
+
+        # Use dynamic best bound calculation during evaluation
+        self.env.envs[0].use_dynamic_best_bound = True  
+
         self.env.reset()
 
         # Simulate for each hour of the day
@@ -512,7 +620,7 @@ class rl_model:
             done = False
             # Reset the environment for each hour & build observations
             self.env.envs[0].set_state(hour)
-            self.env.envs[0].set_rel_gap(0.01, 0.01)
+            self.env.envs[0].set_rel_gap(0.25, 0.25)
             obs = self.env.envs[0].build_obs()
             while (True):
                 if (obs.ndim == 1):
