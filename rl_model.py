@@ -721,6 +721,11 @@ class rl_model:
             gen_amts.append(info[0]['Generation Amounts'])
             rewards.append(reward)
 
+        # Compute the renewable percentage as one number for the entire day.
+        total_renewable_gen = sum([gen[0] + gen[1] for gen in gen_amts])
+        total_renewable_available = sum([self.env.envs[0].solar_profile[h] + self.env.envs[0].wind_profile[h] for h in range(24)])
+        reur = 100 * total_renewable_gen / total_renewable_available
+
         # Plot the results over steps for each hour
         if output:
             plt.figure(figsize=(3.5, 2.5))  # single-column IEEE size
@@ -816,6 +821,7 @@ class rl_model:
             'Solar Generation': [gen_amt[0] for gen_amt in gen_amts],
             'Wind Generation': [gen_amt[1] for gen_amt in gen_amts],
             'Settlement Prices': settlement_prices,
-            'Generation Amounts': gen_amts
+            'Generation Amounts': gen_amts,
+            'Renewable Utilization Ratio': reur
         }
         return output_dict
