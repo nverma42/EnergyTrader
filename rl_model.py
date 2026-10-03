@@ -43,8 +43,7 @@ class energy_env(gym.Env):
         self.battery_capacity = params['battery_capacity']
         self.conv_profile = params['conv_profile']
         self.battery_bal = np.zeros((24,), dtype=np.float32)  # Battery balance for each hour
-        
-        self.best_bounds = self.compute_best_bounds() # Pre-compute best bounds for all hours
+        self.best_bounds, self.best_reur = self.compute_best_bounds() # Pre-compute best bounds for all hours
        
         self.current_step = 0
         self.max_steps = 24
@@ -99,7 +98,7 @@ class energy_env(gym.Env):
 
     def initialize(self, imbalance_rel_gap, best_bound_rel_gap):
         self.set_rel_gap(imbalance_rel_gap, best_bound_rel_gap)
-        self.best_bounds = self.compute_best_bounds()
+        self.best_bounds, self.best_reur = self.compute_best_bounds()
         self.imbal_vio = np.zeros((24,), dtype=np.float32)
 
     def seed(self, seed=None):
@@ -133,7 +132,7 @@ class energy_env(gym.Env):
         self.perturbed_demand = np.clip(self.demand + demand_noise, self.min_demand, self.max_demand)
         self.perturbed_price = np.clip(self.price + price_noise, self.min_price, self.max_price)
 
-        self.best_bounds = self.compute_best_bounds() # Pre-compute best bounds for all hours
+        self.best_bounds, self.best_reur = self.compute_best_bounds() # Pre-compute best bounds for all hours
 
         return self.build_obs()
 
@@ -256,26 +255,36 @@ class energy_env(gym.Env):
             battery_cost = abs(battery_gen) * min(self.perturbed_price)  # Battery discharge cost
 
         conv_cost = conv_gen * self.perturbed_price[h]
-        total_cost = solar_cost + wind_cost + battery_cost + conv_cost
+        dispatch_cost = solar_cost + wind_cost + battery_cost + conv_cost
 
         # Check if the imbalance and cost performance meets the criteria for success 
         # and provide additional reward
         met_imbal_flag, imbalance_ratio = self.check_if_met_imbalance_criterion(supply, demand)
         best_bound = self.best_bounds[h]
-        met_best_bound_flag, best_bound_ratio = self.check_if_met_best_bound_criterion(total_cost, best_bound)
+
+        # Used internally for reward gating: dispatch-only cost, consistent with the LP's
+        # equal-served-demand assumption. Kept separate from VOLL so the agent isn't
+        # double-penalized for unmet demand (already penalized via imbalance_ratio).
+        met_best_bound_flag, best_bound_ratio_reward = self.check_if_met_best_bound_criterion(dispatch_cost, best_bound)
+
+        # Used for reporting only: VOLL-priced total cost vs. the LP bound
+        unmet_supply = max(0.0, demand - supply)
+        unmet_supply_cost = unmet_supply * self.perturbed_price[h]
+        total_cost = dispatch_cost + unmet_supply_cost
+        _, best_bound_ratio_report = self.check_if_met_best_bound_criterion(total_cost, best_bound)
         
         if (imbalance_ratio >= 0.0):
             if (self.reward_mode == 1):
-                reward += self.calc_gated_reward(total_cost, supply, imbalance_ratio, met_imbal_flag, h)
+                reward += self.calc_gated_reward(dispatch_cost, supply, imbalance_ratio, met_imbal_flag, h)
             else:
-                reward += self.calc_weighted_reward(total_cost, supply, imbalance_ratio, h)
+                reward += self.calc_weighted_reward(dispatch_cost, supply, imbalance_ratio, h)
         else:
             # Penalize heavily for over-supply
             reward += -self.imbal_weight
 
         # Save the outputs. These can be used for analysis and plotting after the episode ends
         self.imbalance_ratio[h] = imbalance_ratio
-        self.best_bound_ratio[h] = best_bound_ratio
+        self.best_bound_ratio[h] = best_bound_ratio_report
         self.total_cost[h] = total_cost
         self.generation[h] = [solar_gen, wind_gen, battery_gen, conv_gen]
         self.prev_imbalance_ratio[h] = imbalance_ratio
@@ -472,12 +481,20 @@ class energy_env(gym.Env):
         # Calculate the best bound for each hour based on the optimal dispatch
         i = 0
         best_bounds = []
+        total_renewable = 0.0
+        total_renewable_available = 0.0
         for h in range(24):
             best_bound = q[i] * sol.x[i] + q[i+1] * sol.x[i+1] + q[i+2] * sol.x[i+2] + q[i+3] * sol.x[i+3] + q[i+4] * sol.x[i+4]
             best_bounds.append(best_bound)
+            total_renewable += sol.x[i] + sol.x[i+1]
+            total_renewable_available += self.solar_profile[h] + self.wind_profile[h]
             i += 6
 
-        return best_bounds
+        # Compute LP REUR
+        lp_reur = 100 * (total_renewable / total_renewable_available if total_renewable_available > 0 else 0.0)
+        
+        # Return the best bounds for each hour, total cost, and LP REUR
+        return best_bounds, lp_reur
 
 class safe_energy_env(gym.Wrapper):
     def __init__(self, env):
@@ -649,6 +666,7 @@ class rl_model:
         params['use_curriculum'] = use_curriculum
         params['imbal_weight'] = imbal_weight   
         params['cost_weight'] = cost_weight
+        params['VOLL'] = 5000.0  # $/MWh, example value-of-lost-load
 
         return params
 
@@ -705,7 +723,7 @@ class rl_model:
         done = False
         for hour in range(24):
             time_steps.append(hour)
-            action, hidden_state = self.policy.predict(obs)
+            action, hidden_state = self.policy.predict(obs, deterministic=False)
             obs, reward, done, info = self.env.step(action)
 
             # Store the results
@@ -822,6 +840,8 @@ class rl_model:
             'Wind Generation': [gen_amt[1] for gen_amt in gen_amts],
             'Settlement Prices': settlement_prices,
             'Generation Amounts': gen_amts,
-            'Renewable Utilization Ratio': reur
+            'Renewable Utilization Ratio': reur,
+            'Best Cost': sum(best_bounds) /  len(best_bounds) if len(best_bounds) > 0 else 0,
+            'Best Renewable Utilization Ratio': self.env.envs[0].best_reur
         }
         return output_dict
